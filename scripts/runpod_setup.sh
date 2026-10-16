@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # One-shot environment bootstrap for a RunPod GPU pod (or any bare Ubuntu+CUDA box).
 #
-#   cd /workspace && git clone <your fork of wander-gfm> wander-gfm && cd wander-gfm
+#   cd /workspace && git clone https://github.com/ViswanathGanapathy/wander-gfm.git && cd wander-gfm
 #   bash scripts/runpod_setup.sh
 #
 # What it does (idempotent, safe to re-run):

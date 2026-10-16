@@ -35,7 +35,7 @@ Expose SSH (public key) when deploying; the web terminal drops long jobs.
 ssh root@<pod-ip> -p <port> -i ~/.ssh/<key>
 export HF_HOME=/workspace/hf WANDB_MODE=disabled
 cd /workspace
-git clone <your fork of wander-gfm> wander-gfm      # push this working tree first
+git clone https://github.com/ViswanathGanapathy/wander-gfm.git wander-gfm   # private: see "Cloning a private repo" below
 cd wander-gfm
 bash scripts/runpod_setup.sh                          # ~5 min; idempotent
 ```
@@ -55,6 +55,20 @@ scp -P <port> -i ~/.ssh/<key> ~/wander-gfm/checkpoints/pretrained_wander/pretrai
 
 Open a `tmux` session for everything below (`tmux new -s wander`, reattach with
 `tmux a -t wander`).
+
+### Cloning a private repo on the pod
+
+The repo is private, so the pod needs a credential. Easiest: a fine-grained
+GitHub token with *Contents: read* on this repo, then
+
+```bash
+git clone https://<TOKEN>@github.com/ViswanathGanapathy/wander-gfm.git /workspace/wander-gfm
+```
+
+or install `gh` on the pod and run `gh auth login` first. To skip all of this,
+make the repo public: `gh repo edit ViswanathGanapathy/wander-gfm --visibility public`.
+Baseline submodules under `third_party/` are not needed for Wander evals; do not
+`--recurse-submodules`.
 
 ## 3. Sanity check
 
