@@ -24,3 +24,6 @@ third_party/**/exp/**/evaluation/
 third_party/**/exp/**/tuning/
 
 
+
+# local C++ extension build
+*.so

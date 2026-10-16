@@ -58,3 +58,7 @@ register_anygraph_datasets(DATASET_REGISTRY)
 from .unilp_lp import register_unilp_datasets
 
 register_unilp_datasets(DATASET_REGISTRY)
+
+from .relbench_nc import register_relbench_datasets
+
+register_relbench_datasets(DATASET_REGISTRY)

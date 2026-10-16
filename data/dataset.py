@@ -128,11 +128,16 @@ def apply_feature_preprocessing(
     train_mask = getattr(data, "train_mask", None)
     zscore_mask = train_mask
 
+    # Loader-owned feature pipeline (e.g. RelBench per-table embeddings): skip
+    # PCA / z-score / drop-constant, mirroring ``bundle.metadata["features_preprocessed"]``.
+    features_preprocessed = bool(getattr(data, "features_preprocessed", False))
+
     if (
         has_node_features
         and getattr(data, "x", None) is not None
         and not dummy_features
         and not ignore_features
+        and not features_preprocessed
     ):
         use_graphland_quantiles = (
             graphland_different_transform and hasattr(data, "x_numerical_mask")
