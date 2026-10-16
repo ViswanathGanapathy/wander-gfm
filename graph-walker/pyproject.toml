@@ -1,0 +1,6 @@
+# Declares the build dependency setup.py imports at module level, so
+# `pip install -r requirements.txt` works inside pip's isolated build env
+# (previously it failed with "No module named 'pybind11'").
+[build-system]
+requires = ["setuptools>=61", "wheel", "pybind11>=2.10"]
+build-backend = "setuptools.build_meta"
