@@ -39,8 +39,19 @@ if [[ "${JOB_BASE}" == queue_*.sh || "${JOB_BASE}" == submit_*.sh ]]; then
   exec bash "${JOB_SCRIPT}" "$@"
 fi
 
+# Run locally when there is no usable Slurm: sbatch missing, or present but with
+# no reachable controller (cloud images such as RunPod ship the slurm client
+# binaries without a cluster). FORCE_LOCAL=1 skips the check entirely.
+if [[ "${FORCE_LOCAL:-0}" == "1" ]]; then
+  echo "FORCE_LOCAL=1; running locally: bash ${JOB_SCRIPT} $*"
+  exec bash "${JOB_SCRIPT}" "$@"
+fi
 if ! command -v sbatch >/dev/null 2>&1; then
   echo "sbatch not found; running locally: bash ${JOB_SCRIPT} $*"
+  exec bash "${JOB_SCRIPT}" "$@"
+fi
+if ! timeout 20 sinfo -h >/dev/null 2>&1; then
+  echo "sbatch present but no Slurm controller reachable; running locally: bash ${JOB_SCRIPT} $*"
   exec bash "${JOB_SCRIPT}" "$@"
 fi
 

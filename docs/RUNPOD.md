@@ -157,8 +157,13 @@ rel-stack takes longer than evaluating it.
 
 ## RunPod-specific gotchas
 
-* No `sbatch`: the queue scripts' `dataset_mem` / `CLUSTER_MEM` values are ignored.
-  Memory is whatever the pod has.
+* No Slurm: the queue scripts' `dataset_mem` / `CLUSTER_MEM` values are ignored.
+  Memory is whatever the pod has. Some images ship the `sbatch` binary without a
+  cluster; `submit.sh` detects that (`sinfo` fails) and runs locally. If it still
+  tries to submit, `export FORCE_LOCAL=1`.
+* The OSF download link sometimes returns a 1 KB HTML page instead of the 145 MB
+  checkpoint (rate limiting). Check with `ls -la` and, if so, copy the file from the
+  laptop with `scp`/`runpodctl` as shown in section 2.
 * `common.sh` picks Python as: active conda env named `$CONDA_ENV` → `conda activate
   $CONDA_ENV` → `python` on PATH. On an image that ships conda but where you used the
   venv, run `CONDA_ENV=base` or deactivate conda, or the script exits at
