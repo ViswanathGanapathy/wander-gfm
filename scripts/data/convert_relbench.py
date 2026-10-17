@@ -84,6 +84,8 @@ def main(argv=None) -> int:
                    help="subsample majority class(es) among TRAIN labels to the rarest class (key suffix _BAL)")
     p.add_argument("--balance-max-ratio", type=float, default=1.0,
                    help="with --balance-train-labels: max (class count)/(rarest class count)")
+    p.add_argument("--max-train-labels", type=int, default=None,
+                   help="cap TRAIN labels (random, after balancing); bounds Wander's train-KV cache (~3 MB RAM per train node)")
     p.add_argument("--label-mode", choices=("entity", "label_nodes"), default="entity",
                    help="entity: one label per entity node (registry key RELBENCH_*); "
                         "label_nodes: one timestamped node per RelBench label row (key RELBENCH_*_LN)")
@@ -120,6 +122,7 @@ def main(argv=None) -> int:
                 feature_layout=args.feature_layout, feature_width=args.feature_width,
                 contract_link_tables=args.contract_link_tables, label_mode=args.label_mode,
                 balance_train_labels=args.balance_train_labels, balance_max_ratio=args.balance_max_ratio,
+                max_train_labels=args.max_train_labels,
             )
         except Exception as exc:  # noqa: BLE001
             if len(jobs) == 1:

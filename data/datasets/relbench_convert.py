@@ -528,6 +528,7 @@ def convert_relbench_task(
     label_mode: str = "entity",
     balance_train_labels: bool = False,
     balance_max_ratio: float = 1.0,
+    max_train_labels: Optional[int] = None,
     seed: int = 0,
     write: bool = True,
     verbose: bool = True,
@@ -569,6 +570,10 @@ def convert_relbench_task(
             and test are untouched. Wander uses train labels as in-context examples,
             so a skewed prior (rel-f1 driver-dnf train is 88% positive, test 70%)
             shifts its scores; balancing removes that prior.
+        max_train_labels: keep at most this many TRAIN labels (uniform random after
+            balancing); val/test untouched. Wander's train-KV cache costs roughly
+            3 MB of host RAM and ~0.07 s of H100 time per train node per seed
+            (16 passes, 256 walks), so cap this at 10k-20k for large tasks.
         seed: RNG seed for seed-order shuffling inside each split and balancing.
     """
     if label_mode not in LABEL_MODES:
@@ -613,6 +618,11 @@ def convert_relbench_task(
             keep = ~is_train
             keep[np.nonzero(is_train)[0][keep_train]] = True
             label_rows = label_rows[keep].reset_index(drop=True)
+        if max_train_labels is not None:
+            tr_idx = np.nonzero((label_rows["split"] == "train").to_numpy())[0]
+            if tr_idx.size > max_train_labels:
+                drop = np.random.RandomState(seed + 1).choice(tr_idx, size=tr_idx.size - max_train_labels, replace=False)
+                label_rows = label_rows.drop(index=drop).reset_index(drop=True)
         table_names.append(LABEL_TABLE)
         table_sizes[LABEL_TABLE] = len(label_rows)
     offsets = _table_offsets(table_sizes)
@@ -651,6 +661,10 @@ def convert_relbench_task(
             codes_tr = np.array([per_split["train"][e] for e in ents], dtype=np.int64)
             keep = balanced_keep_mask(codes_tr, np.random.RandomState(seed), balance_max_ratio)
             per_split["train"] = {int(e): int(c) for e, c in zip(ents[keep], codes_tr[keep])}
+        if max_train_labels is not None and len(per_split["train"]) > max_train_labels:
+            ents = np.array(sorted(per_split["train"]), dtype=np.int64)
+            keep_e = np.random.RandomState(seed + 1).choice(ents, size=max_train_labels, replace=False)
+            per_split["train"] = {int(e): per_split["train"][int(e)] for e in keep_e}
         ent_off = offsets[tk.entity_table]
         for s in SPLITS:
             for ent, lab in per_split[s].items():
@@ -672,6 +686,8 @@ def convert_relbench_task(
             }
             for s in SPLITS
         }
+    if max_train_labels is not None:
+        label_stats["max_train_labels"] = int(max_train_labels)
     if balance_train_labels:
         tr_codes = y[split_masks["train"]].astype(np.int64)
         label_stats["train_balancing"] = {
@@ -858,6 +874,7 @@ def convert_relbench_task(
             "label_mode": label_mode,
             "balance_train_labels": balance_train_labels,
             "balance_max_ratio": balance_max_ratio,
+            "max_train_labels": max_train_labels,
             "seed": seed,
         },
         "relbench_version": getattr(relbench, "__version__", "unknown"),
