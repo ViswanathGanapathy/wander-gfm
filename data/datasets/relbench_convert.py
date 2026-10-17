@@ -27,6 +27,8 @@ SPLIT_PRECEDENCE = {
 }
 LABEL_POLICIES = ("latest", "earliest")
 FEATURE_LAYOUTS = ("shared", "block")
+LABEL_MODES = ("entity", "label_nodes")
+LABEL_TABLE = "__labels__"   # pseudo-table holding one node per label row (label_nodes mode)
 
 MISSING_CAT = 0  # categorical code reserved for "missing / not this table"
 
@@ -342,6 +344,34 @@ def encode_labels(per_split: Dict[str, Dict[int, Any]], task_type: str) -> Tuple
     return encoded, [str(c) for c in classes]
 
 
+def collect_label_rows(task) -> pd.DataFrame:
+    """All ``(entity, timestamp, label, split)`` rows of the task (label_nodes mode)."""
+    frames = []
+    for split in SPLITS:
+        df = task.get_table(split, mask_input_cols=False).df
+        df = df[df[task.target_col].notna()]
+        frames.append(pd.DataFrame({
+            "entity": df[task.entity_col].to_numpy(dtype="int64"),
+            "timestamp": pd.to_datetime(df[task.time_col]).to_numpy(),
+            "label": df[task.target_col].to_numpy(),
+            "split": split,
+        }))
+    return pd.concat(frames, ignore_index=True)
+
+
+def encode_label_values(values: np.ndarray, task_type: str) -> Tuple[np.ndarray, List[str]]:
+    """Map raw label values to ``0..K-1`` codes (binary tasks keep 0/1)."""
+    if task_type == "binary_classification":
+        codes = np.rint(values.astype(np.float64)).astype(np.int64)
+        bad = np.setdiff1d(np.unique(codes), [0, 1])
+        if bad.size:
+            raise ValueError(f"binary task has non-{{0,1}} labels: {bad[:5].tolist()}")
+        return codes, ["0", "1"]
+    classes = sorted(set(values.tolist()), key=lambda v: (str(type(v)), v))
+    mapping = {v: i for i, v in enumerate(classes)}
+    return np.array([mapping[v] for v in values.tolist()], dtype=np.int64), [str(c) for c in classes]
+
+
 # --------------------------------------------------------------------------- #
 # Subsampling
 # --------------------------------------------------------------------------- #
@@ -479,6 +509,7 @@ def convert_relbench_task(
     feature_layout: str = "shared",
     feature_width: int = 64,
     contract_link_tables: bool = False,
+    label_mode: str = "entity",
     seed: int = 0,
     write: bool = True,
     verbose: bool = True,
@@ -509,8 +540,16 @@ def convert_relbench_task(
             become direct edges between their parents instead of nodes. Halves the
             walk length between e.g. two users of rel-event's 30M-row user_friends
             table and removes those rows from the node budget.
+        label_mode: ``entity`` puts one label on each entity-table node (see
+            ``label_policy`` / ``split_precedence``). ``label_nodes`` keeps EVERY
+            RelBench label row as its own node, linked to its entity by a dedicated
+            relation and carrying the label timestamp as its only feature; train /
+            val / test masks live on those nodes. Nothing is deduplicated, so an
+            entity with ten monthly labels contributes ten nodes.
         seed: RNG seed for seed-order shuffling inside each split.
     """
+    if label_mode not in LABEL_MODES:
+        raise ValueError(f"label_mode must be one of {LABEL_MODES}, got {label_mode!r}")
     if feature_layout not in FEATURE_LAYOUTS:
         raise ValueError(f"feature_layout must be one of {FEATURE_LAYOUTS}, got {feature_layout!r}")
     import relbench  # lazy: only needed when building the cache
@@ -537,33 +576,65 @@ def convert_relbench_task(
         ]
     table_names = [t for t in all_tables if t not in contracted]
     table_sizes = {t: len(db.table_dict[t]) for t in table_names}
+    label_rows: Optional[pd.DataFrame] = None
+    if label_mode == "label_nodes":
+        label_rows = collect_label_rows(tk)
+        n_ent = len(db.table_dict[tk.entity_table])
+        label_rows = label_rows[(label_rows["entity"] >= 0) & (label_rows["entity"] < n_ent)]
+        label_rows = label_rows.reset_index(drop=True)
+        table_names.append(LABEL_TABLE)
+        table_sizes[LABEL_TABLE] = len(label_rows)
     offsets = _table_offsets(table_sizes)
     num_nodes = sum(table_sizes.values())
     log(f"[relbench] {dataset}/{task}: {task_type}, entity table {tk.entity_table}, "
         f"{len(all_tables)} tables, {num_nodes} row-nodes"
         + (f" (contracted link tables: {contracted})" if contracted else "")
+        + (f" (incl. {len(label_rows)} label nodes)" if label_rows is not None else "")
         + f" ({time.time()-t0:.1f}s)")
 
     # ---- edges
-    ei_dir, et_dir, relations = build_fkey_edges(db, table_names, offsets, contracted)
+    ei_dir, et_dir, relations = build_fkey_edges(
+        db, [t for t in table_names if t != LABEL_TABLE], offsets, contracted
+    )
+    if label_rows is not None:
+        rel_id = len(relations)
+        relations.append((LABEL_TABLE, "entity", tk.entity_table))
+        src = offsets[LABEL_TABLE] + np.arange(len(label_rows), dtype=np.int64)
+        dst = offsets[tk.entity_table] + label_rows["entity"].to_numpy(dtype=np.int64)
+        ei_dir = np.concatenate([ei_dir, np.stack([src, dst])], axis=1)
+        et_dir = np.concatenate([et_dir, np.full(len(label_rows), rel_id, dtype=np.int64)])
     edge_index, edge_type = symmetrize(ei_dir, et_dir)
-    log(f"[relbench] {ei_dir.shape[1]} fkey edges, {len(relations)} relation types")
+    log(f"[relbench] {ei_dir.shape[1]} directed edges, {len(relations)} relation types")
 
     # ---- labels
-    per_split_raw, label_stats = collect_entity_labels(
-        tk, label_policy=label_policy, split_precedence=split_precedence
-    )
-    per_split, class_names = encode_labels(per_split_raw, task_type)
-    ent_off = offsets[tk.entity_table]
     y = np.full(num_nodes, np.nan, dtype=np.float32)
     split_masks = {s: np.zeros(num_nodes, dtype=bool) for s in SPLITS}
-    for s in SPLITS:
-        for ent, lab in per_split[s].items():
-            node = ent_off + ent
-            if node >= ent_off + table_sizes[tk.entity_table]:
-                continue  # dangling entity (already filtered by relbench, be safe)
-            y[node] = lab
-            split_masks[s][node] = True
+    if label_rows is None:
+        per_split_raw, label_stats = collect_entity_labels(
+            tk, label_policy=label_policy, split_precedence=split_precedence
+        )
+        per_split, class_names = encode_labels(per_split_raw, task_type)
+        ent_off = offsets[tk.entity_table]
+        for s in SPLITS:
+            for ent, lab in per_split[s].items():
+                node = ent_off + ent
+                if node >= ent_off + table_sizes[tk.entity_table]:
+                    continue  # dangling entity (already filtered by relbench, be safe)
+                y[node] = lab
+                split_masks[s][node] = True
+    else:
+        codes, class_names = encode_label_values(label_rows["label"].to_numpy(), task_type)
+        nodes = offsets[LABEL_TABLE] + np.arange(len(label_rows), dtype=np.int64)
+        y[nodes] = codes
+        for s in SPLITS:
+            split_masks[s][nodes[(label_rows["split"] == s).to_numpy()]] = True
+        label_stats = {
+            s: {
+                "label_rows": int((label_rows["split"] == s).sum()),
+                "unique_entities": int(label_rows.loc[label_rows["split"] == s, "entity"].nunique()),
+            }
+            for s in SPLITS
+        }
     log("[relbench] labels per split: " + ", ".join(
         f"{s}={int(split_masks[s].sum())}" for s in SPLITS) + f"; classes={class_names}")
 
@@ -618,10 +689,15 @@ def convert_relbench_task(
         pass
     feats: Dict[str, TableFeatures] = {}
     for t in table_names:
-        table = db.table_dict[t]
         rows = kept_rows[t]
-        df = table.df.iloc[rows] if rows.size != len(table.df) else table.df
-        skip = [c for c in [table.pkey_col, *table.fkey_col_to_pkey_table] if c is not None]
+        if t == LABEL_TABLE:
+            assert label_rows is not None
+            df = label_rows.iloc[rows][["timestamp"]]
+            skip: List[str] = []
+        else:
+            table = db.table_dict[t]
+            df = table.df.iloc[rows] if rows.size != len(table.df) else table.df
+            skip = [c for c in [table.pkey_col, *table.fkey_col_to_pkey_table] if c is not None]
         feats[t] = featurize_table(
             df, t, skip_cols=skip, time_origin=time_origin,
             max_categories=max_categories, text_drop_ratio=text_drop_ratio,
@@ -711,6 +787,7 @@ def convert_relbench_task(
         "num_nodes_full": int(num_nodes),
         "num_edges_directed": int(edge_index.shape[1] // 2),
         "classes": class_names,
+        "label_mode": label_mode,
         "labels": {s: int(split_masks[s].sum()) for s in SPLITS},
         "label_stats": label_stats,
         "feature_layout": feature_layout,
@@ -732,6 +809,7 @@ def convert_relbench_task(
             "feature_layout": feature_layout,
             "feature_width": feature_width,
             "contract_link_tables": contract_link_tables,
+            "label_mode": label_mode,
             "seed": seed,
         },
         "relbench_version": getattr(relbench, "__version__", "unknown"),

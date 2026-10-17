@@ -84,16 +84,26 @@ over seeds). Anything near 0.3 means features or the checkpoint are not being re
 
 ## 4. Convert RelBench tasks
 
+Two label conversions exist. `--label-mode entity` (default, registry key
+`RELBENCH_<DS>_<TASK>`) puts one label on each entity node: the latest label inside a
+split, each entity assigned to one split with precedence test > val > train.
+`--label-mode label_nodes` (key `RELBENCH_<DS>_<TASK>_LN`) keeps every RelBench label
+row as its own node, linked to its entity by a dedicated relation and carrying the
+label timestamp as its feature; nothing is deduplicated, so this is the one to
+compare against RelBench baselines. Both can be built for the same task; the queue
+evaluates whichever caches exist.
+
 ```bash
 # small, full database
-python scripts/data/convert_relbench.py --dataset rel-f1 --task driver-dnf
-python scripts/data/convert_relbench.py --dataset rel-f1 --task driver-top3
+python scripts/data/convert_relbench.py --dataset rel-f1 --task driver-dnf --label-mode label_nodes
+python scripts/data/convert_relbench.py --dataset rel-f1 --task driver-top3 --label-mode label_nodes
+python scripts/data/convert_relbench.py --dataset rel-f1 --task driver-dnf            # entity mode, for comparison
 # medium: junction tables become edges, keep every labeled entity, BFS out to the budget
-python scripts/data/convert_relbench.py --dataset rel-trial --task study-outcome --contract-link-tables --max-nodes 300000
-python scripts/data/convert_relbench.py --dataset rel-event --task user-repeat   --contract-link-tables --max-nodes 300000
+python scripts/data/convert_relbench.py --dataset rel-trial --task study-outcome --label-mode label_nodes --contract-link-tables --max-nodes 300000
+python scripts/data/convert_relbench.py --dataset rel-event --task user-repeat   --label-mode label_nodes --contract-link-tables --max-nodes 300000
 # large: the labeled sets alone are huge; labels are capped at half the budget (--max-labeled-fraction)
-python scripts/data/convert_relbench.py --dataset rel-stack --task user-engagement --contract-link-tables --max-nodes 300000
-python scripts/data/convert_relbench.py --dataset rel-stack --task user-badge      --contract-link-tables --max-nodes 300000
+python scripts/data/convert_relbench.py --dataset rel-stack --task user-engagement --label-mode label_nodes --contract-link-tables --max-nodes 300000
+python scripts/data/convert_relbench.py --dataset rel-stack --task user-badge      --label-mode label_nodes --contract-link-tables --max-nodes 300000
 # list the classification tasks of any dataset
 python scripts/data/convert_relbench.py --dataset rel-amazon --list-tasks
 ```
@@ -101,7 +111,9 @@ python scripts/data/convert_relbench.py --dataset rel-amazon --list-tasks
 Each conversion writes `raw_data/RelBench/<dataset>__<task>/{data.pt,meta.json}`;
 `meta.json` records the relation table, feature columns, per-split label counts, and
 how many labels were dropped by the test > val > train precedence rule. Read it
-before trusting a number: on rel-f1 the test set is 42 drivers.
+before trusting a number: in entity mode the rel-f1 test set is 42 drivers, in
+label_nodes mode it is the full 702 RelBench test rows. With `--max-nodes`, at most
+`--max-labeled-fraction` (0.5) of the budget goes to label nodes, test and val first.
 
 Conversion is CPU/RAM bound: the full database is loaded with pandas before the
 BFS subsample, so rel-stack (5.4 M rows) and rel-trial (5.9 M rows) want ~20–30 GB RAM

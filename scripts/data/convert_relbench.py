@@ -3,8 +3,11 @@
 
 Usage (from the repo root, ``pip install relbench`` first):
 
-    # one task, full database (rel-f1 is small)
+    # one task, full database (rel-f1 is small); one label per entity node
     python scripts/data/convert_relbench.py --dataset rel-f1 --task driver-dnf
+
+    # same task, one timestamped node per RelBench label row (recommended; key RELBENCH_F1_DRIVER_DNF_LN)
+    python scripts/data/convert_relbench.py --dataset rel-f1 --task driver-dnf --label-mode label_nodes
 
     # large database: BFS-subsample to 200k nodes around the labeled entities
     python scripts/data/convert_relbench.py --dataset rel-trial --task study-outcome --max-nodes 200000
@@ -52,7 +55,7 @@ def _list_tasks(dataset: str) -> int:
         tt = TaskType(tk.task_type).value
         ok = tt in ("binary_classification", "multiclass_classification")
         ent = getattr(tk, "entity_table", "-")
-        print(f"  {name:28s} {tt:26s} entity={ent:16s} {'-> ' + registry_key(dataset, name) if ok else ''}")
+        print(f"  {name:28s} {tt:26s} entity={ent:16s} {'-> ' + registry_key(dataset, name) + ' / _LN' if ok else ''}")
     return 0
 
 
@@ -74,6 +77,9 @@ def main(argv=None) -> int:
     p.add_argument("--feature-width", type=int, default=64)
     p.add_argument("--contract-link-tables", action="store_true",
                    help="junction tables (2 fkeys, no other columns) become edges instead of nodes")
+    p.add_argument("--label-mode", choices=("entity", "label_nodes"), default="entity",
+                   help="entity: one label per entity node (registry key RELBENCH_*); "
+                        "label_nodes: one timestamped node per RelBench label row (key RELBENCH_*_LN)")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--force", action="store_true", help="rebuild even if data.pt exists")
     args = p.parse_args(argv)
@@ -92,11 +98,11 @@ def main(argv=None) -> int:
 
     failures = []
     for ds, tk in jobs:
-        out = cache_dir(args.data_dir, ds, tk)
+        out = cache_dir(args.data_dir, ds, tk, args.label_mode)
         if (out / "data.pt").is_file() and not args.force:
             print(f"[skip] {ds}/{tk}: {out / 'data.pt'} exists (--force to rebuild)")
             continue
-        print(f"=== {ds}/{tk} -> {registry_key(ds, tk)} ===")
+        print(f"=== {ds}/{tk} [{args.label_mode}] -> {registry_key(ds, tk, args.label_mode)} ===")
         try:
             convert_relbench_task(
                 ds, tk, out_dir=out, max_nodes=args.max_nodes,
@@ -104,7 +110,7 @@ def main(argv=None) -> int:
                 label_policy=args.label_policy, split_precedence=args.split_precedence,
                 max_labeled_fraction=args.max_labeled_fraction, seed=args.seed,
                 feature_layout=args.feature_layout, feature_width=args.feature_width,
-                contract_link_tables=args.contract_link_tables,
+                contract_link_tables=args.contract_link_tables, label_mode=args.label_mode,
             )
         except Exception as exc:  # noqa: BLE001
             if len(jobs) == 1:
