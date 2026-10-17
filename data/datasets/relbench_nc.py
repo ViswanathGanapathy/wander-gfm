@@ -23,7 +23,9 @@ Registry keys are ``RELBENCH_<DATASET>_<TASK>`` with ``rel-`` stripped and
 dashes mapped to underscores, e.g. ``RELBENCH_F1_DRIVER_DNF``. The ``_LN`` suffix
 (``RELBENCH_F1_DRIVER_DNF_LN``) selects the ``label_nodes`` conversion: every
 RelBench label row is its own timestamped node linked to its entity, so nothing is
-deduplicated (cache dir ``<dataset>__<task>__labelnodes``). Extra tasks can be
+deduplicated (cache dir ``<dataset>__<task>__labelnodes``). A further ``_BAL``
+suffix selects a graph whose TRAIN labels were class-balanced by subsampling
+(``--balance-train-labels``; cache dir suffix ``__balanced``). Extra tasks can be
 registered with ``RELBENCH_EXTRA_TASKS="rel-x:task-a,rel-y:task-b"``.
 
 Converted graphs are cached at ``<data_dir>/RelBench/<dataset>__<task>/data.pt``.
@@ -71,19 +73,26 @@ _MODE_KEY_SUFFIX = {"entity": "", "label_nodes": "_LN"}
 _MODE_DIR_SUFFIX = {"entity": "", "label_nodes": "__labelnodes"}
 
 
-def registry_key(dataset: str, task: str, label_mode: str = "entity") -> str:
+_BAL_KEY_SUFFIX = {False: "", True: "_BAL"}
+_BAL_DIR_SUFFIX = {False: "", True: "__balanced"}
+VARIANTS = [(m, b) for m in LABEL_MODES for b in (False, True)]
+
+
+def registry_key(dataset: str, task: str, label_mode: str = "entity", balanced: bool = False) -> str:
     ds = dataset.lower()
     if ds.startswith("rel-"):
         ds = ds[len("rel-"):]
-    return f"RELBENCH_{ds}_{task}".upper().replace("-", "_") + _MODE_KEY_SUFFIX[label_mode]
+    return (f"RELBENCH_{ds}_{task}".upper().replace("-", "_")
+            + _MODE_KEY_SUFFIX[label_mode] + _BAL_KEY_SUFFIX[bool(balanced)])
 
 
-def cache_dir(data_dir: str, dataset: str, task: str, label_mode: str = "entity") -> Path:
-    return Path(data_dir) / ROOT_FOLDER / f"{dataset}__{task}{_MODE_DIR_SUFFIX[label_mode]}"
+def cache_dir(data_dir: str, dataset: str, task: str, label_mode: str = "entity", balanced: bool = False) -> Path:
+    return (Path(data_dir) / ROOT_FOLDER
+            / f"{dataset}__{task}{_MODE_DIR_SUFFIX[label_mode]}{_BAL_DIR_SUFFIX[bool(balanced)]}")
 
 
-def cache_path(data_dir: str, dataset: str, task: str, label_mode: str = "entity") -> Path:
-    return cache_dir(data_dir, dataset, task, label_mode) / "data.pt"
+def cache_path(data_dir: str, dataset: str, task: str, label_mode: str = "entity", balanced: bool = False) -> Path:
+    return cache_dir(data_dir, dataset, task, label_mode, balanced) / "data.pt"
 
 
 def load_relbench_nc(
@@ -92,11 +101,12 @@ def load_relbench_nc(
     task: str,
     *,
     label_mode: str = "entity",
+    balanced: bool = False,
     force: bool = False,
     **convert_kwargs: Any,
 ) -> Data:
     """Load (or build) the converted RelBench task graph."""
-    path = cache_path(data_dir, dataset, task, label_mode)
+    path = cache_path(data_dir, dataset, task, label_mode, balanced)
     if path.is_file() and not force:
         data = torch.load(path, map_location="cpu", weights_only=False)
     else:
@@ -104,22 +114,23 @@ def load_relbench_nc(
         from .relbench_convert import convert_relbench_task
 
         data = convert_relbench_task(
-            dataset, task, out_dir=cache_dir(data_dir, dataset, task, label_mode),
-            label_mode=label_mode, **convert_kwargs
+            dataset, task, out_dir=cache_dir(data_dir, dataset, task, label_mode, balanced),
+            label_mode=label_mode, balance_train_labels=balanced, **convert_kwargs
         )
     if not hasattr(data, "num_nodes") or data.num_nodes is None:
         data.num_nodes = int(data.x.size(0))
     return data
 
 
-def _mod(dataset: str, task: str, label_mode: str = "entity") -> ModuleType:
-    key = registry_key(dataset, task, label_mode)
+def _mod(dataset: str, task: str, label_mode: str = "entity", balanced: bool = False) -> ModuleType:
+    key = registry_key(dataset, task, label_mode, balanced)
     m = ModuleType(key.lower())
-    m.NAME = f"{dataset}/{task}" + ("" if label_mode == "entity" else f" [{label_mode}]")
+    m.NAME = f"{dataset}/{task}" + ("" if label_mode == "entity" else f" [{label_mode}]") + (" [balanced]" if balanced else "")
     m.REGISTRY_KEY = key
     m.RELBENCH_DATASET = dataset
     m.RELBENCH_TASK = task
     m.RELBENCH_LABEL_MODE = label_mode
+    m.RELBENCH_BALANCED = balanced
     m.HAS_NODE_FEATURES = True
     m.HAS_NODE_LABELS = True
     m.HAS_PREDEFINED_NODE_SPLIT = True   # temporal split from RelBench
@@ -133,7 +144,7 @@ def _mod(dataset: str, task: str, label_mode: str = "entity") -> ModuleType:
     ) -> Data:
         # The two GraphLand flags only steer apply_feature_preprocessing; the
         # cached graph already carries the per-type column masks either way.
-        return load_relbench_nc(data_dir, dataset, task, label_mode=label_mode)
+        return load_relbench_nc(data_dir, dataset, task, label_mode=label_mode, balanced=balanced)
 
     m.load_base_dataset = load_base_dataset
     return m
@@ -160,8 +171,8 @@ def _extra_tasks_from_env() -> List[Tuple[str, str]]:
 def build_relbench_registry() -> Dict[str, ModuleType]:
     reg: Dict[str, ModuleType] = {}
     for ds, tk in RELBENCH_CLASSIFICATION_TASKS + _extra_tasks_from_env():
-        for mode in LABEL_MODES:
-            m = _mod(ds, tk, mode)
+        for mode, bal in VARIANTS:
+            m = _mod(ds, tk, mode, bal)
             reg[m.REGISTRY_KEY] = m
     return reg
 

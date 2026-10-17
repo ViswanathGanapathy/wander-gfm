@@ -9,6 +9,9 @@ Usage (from the repo root, ``pip install relbench`` first):
     # same task, one timestamped node per RelBench label row (recommended; key RELBENCH_F1_DRIVER_DNF_LN)
     python scripts/data/convert_relbench.py --dataset rel-f1 --task driver-dnf --label-mode label_nodes
 
+    # ... with class-balanced train labels (key RELBENCH_F1_DRIVER_DNF_LN_BAL)
+    python scripts/data/convert_relbench.py --dataset rel-f1 --task driver-dnf --label-mode label_nodes --balance-train-labels
+
     # large database: BFS-subsample to 200k nodes around the labeled entities
     python scripts/data/convert_relbench.py --dataset rel-trial --task study-outcome --max-nodes 200000
 
@@ -77,6 +80,10 @@ def main(argv=None) -> int:
     p.add_argument("--feature-width", type=int, default=64)
     p.add_argument("--contract-link-tables", action="store_true",
                    help="junction tables (2 fkeys, no other columns) become edges instead of nodes")
+    p.add_argument("--balance-train-labels", action="store_true",
+                   help="subsample majority class(es) among TRAIN labels to the rarest class (key suffix _BAL)")
+    p.add_argument("--balance-max-ratio", type=float, default=1.0,
+                   help="with --balance-train-labels: max (class count)/(rarest class count)")
     p.add_argument("--label-mode", choices=("entity", "label_nodes"), default="entity",
                    help="entity: one label per entity node (registry key RELBENCH_*); "
                         "label_nodes: one timestamped node per RelBench label row (key RELBENCH_*_LN)")
@@ -98,11 +105,12 @@ def main(argv=None) -> int:
 
     failures = []
     for ds, tk in jobs:
-        out = cache_dir(args.data_dir, ds, tk, args.label_mode)
+        out = cache_dir(args.data_dir, ds, tk, args.label_mode, args.balance_train_labels)
         if (out / "data.pt").is_file() and not args.force:
             print(f"[skip] {ds}/{tk}: {out / 'data.pt'} exists (--force to rebuild)")
             continue
-        print(f"=== {ds}/{tk} [{args.label_mode}] -> {registry_key(ds, tk, args.label_mode)} ===")
+        print(f"=== {ds}/{tk} [{args.label_mode}{', balanced' if args.balance_train_labels else ''}] -> "
+              f"{registry_key(ds, tk, args.label_mode, args.balance_train_labels)} ===")
         try:
             convert_relbench_task(
                 ds, tk, out_dir=out, max_nodes=args.max_nodes,
@@ -111,6 +119,7 @@ def main(argv=None) -> int:
                 max_labeled_fraction=args.max_labeled_fraction, seed=args.seed,
                 feature_layout=args.feature_layout, feature_width=args.feature_width,
                 contract_link_tables=args.contract_link_tables, label_mode=args.label_mode,
+                balance_train_labels=args.balance_train_labels, balance_max_ratio=args.balance_max_ratio,
             )
         except Exception as exc:  # noqa: BLE001
             if len(jobs) == 1:

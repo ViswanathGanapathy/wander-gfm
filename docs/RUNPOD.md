@@ -91,13 +91,18 @@ split, each entity assigned to one split with precedence test > val > train.
 row as its own node, linked to its entity by a dedicated relation and carrying the
 label timestamp as its feature; nothing is deduplicated, so this is the one to
 compare against RelBench baselines. Both can be built for the same task; the queue
-evaluates whichever caches exist.
+evaluates whichever caches exist. Adding `--balance-train-labels` subsamples the
+majority class among TRAIN labels to the rarest class (val/test untouched) and
+registers the graph with a further `_BAL` suffix, e.g. `RELBENCH_F1_DRIVER_DNF_LN_BAL`.
+Wander uses the train labels as in-context examples, so a skewed prior (driver-dnf
+train is 88% positive, test 70%) shifts its scores; the balanced graph removes it.
 
 ```bash
 # small, full database
 python scripts/data/convert_relbench.py --dataset rel-f1 --task driver-dnf --label-mode label_nodes
 python scripts/data/convert_relbench.py --dataset rel-f1 --task driver-top3 --label-mode label_nodes
 python scripts/data/convert_relbench.py --dataset rel-f1 --task driver-dnf            # entity mode, for comparison
+python scripts/data/convert_relbench.py --dataset rel-f1 --task driver-dnf --label-mode label_nodes --balance-train-labels
 # medium: junction tables become edges, keep every labeled entity, BFS out to the budget
 python scripts/data/convert_relbench.py --dataset rel-trial --task study-outcome --label-mode label_nodes --contract-link-tables --max-nodes 300000
 python scripts/data/convert_relbench.py --dataset rel-event --task user-repeat   --label-mode label_nodes --contract-link-tables --max-nodes 300000

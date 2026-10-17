@@ -28,10 +28,10 @@ if [[ -z "${DATASETS:-}" ]]; then
   DATASETS="$(python3 - <<'PY'
 import os, sys
 sys.path.insert(0, os.getcwd())
-from data.datasets.relbench_nc import LABEL_MODES, RELBENCH_CLASSIFICATION_TASKS, cache_path, registry_key
+from data.datasets.relbench_nc import RELBENCH_CLASSIFICATION_TASKS, VARIANTS, cache_path, registry_key
 data_dir = os.environ.get("RAW_DATA_DIR", "raw_data")
-keys = [registry_key(d, t, m) for d, t in RELBENCH_CLASSIFICATION_TASKS for m in LABEL_MODES
-        if cache_path(data_dir, d, t, m).is_file()]
+keys = [registry_key(d, t, m, b) for d, t in RELBENCH_CLASSIFICATION_TASKS for m, b in VARIANTS
+        if cache_path(data_dir, d, t, m, b).is_file()]
 print(" ".join(keys))
 PY
 )"

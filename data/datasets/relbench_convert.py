@@ -372,6 +372,22 @@ def encode_label_values(values: np.ndarray, task_type: str) -> Tuple[np.ndarray,
     return np.array([mapping[v] for v in values.tolist()], dtype=np.int64), [str(c) for c in classes]
 
 
+def balanced_keep_mask(codes: np.ndarray, rng: np.random.RandomState, max_ratio: float = 1.0) -> np.ndarray:
+    """Keep all rows of the rarest class and at most ``max_ratio`` x that many of
+    every other class (uniformly sampled). Used to balance the in-context train labels."""
+    keep = np.zeros(codes.shape[0], dtype=bool)
+    if codes.size == 0:
+        return keep
+    classes, counts = np.unique(codes, return_counts=True)
+    cap = int(np.ceil(counts.min() * max_ratio))
+    for c, n in zip(classes, counts):
+        idx = np.nonzero(codes == c)[0]
+        if n > cap:
+            idx = rng.choice(idx, size=cap, replace=False)
+        keep[idx] = True
+    return keep
+
+
 # --------------------------------------------------------------------------- #
 # Subsampling
 # --------------------------------------------------------------------------- #
@@ -510,6 +526,8 @@ def convert_relbench_task(
     feature_width: int = 64,
     contract_link_tables: bool = False,
     label_mode: str = "entity",
+    balance_train_labels: bool = False,
+    balance_max_ratio: float = 1.0,
     seed: int = 0,
     write: bool = True,
     verbose: bool = True,
@@ -546,7 +564,12 @@ def convert_relbench_task(
             relation and carrying the label timestamp as its only feature; train /
             val / test masks live on those nodes. Nothing is deduplicated, so an
             entity with ten monthly labels contributes ten nodes.
-        seed: RNG seed for seed-order shuffling inside each split.
+        balance_train_labels: subsample the majority class(es) among TRAIN labels
+            so no class has more than ``balance_max_ratio`` x the rarest class. Val
+            and test are untouched. Wander uses train labels as in-context examples,
+            so a skewed prior (rel-f1 driver-dnf train is 88% positive, test 70%)
+            shifts its scores; balancing removes that prior.
+        seed: RNG seed for seed-order shuffling inside each split and balancing.
     """
     if label_mode not in LABEL_MODES:
         raise ValueError(f"label_mode must be one of {LABEL_MODES}, got {label_mode!r}")
@@ -582,6 +605,14 @@ def convert_relbench_task(
         n_ent = len(db.table_dict[tk.entity_table])
         label_rows = label_rows[(label_rows["entity"] >= 0) & (label_rows["entity"] < n_ent)]
         label_rows = label_rows.reset_index(drop=True)
+        n_train_before_balance = int((label_rows["split"] == "train").sum())
+        if balance_train_labels:
+            codes_all, _ = encode_label_values(label_rows["label"].to_numpy(), task_type)
+            is_train = (label_rows["split"] == "train").to_numpy()
+            keep_train = balanced_keep_mask(codes_all[is_train], np.random.RandomState(seed), balance_max_ratio)
+            keep = ~is_train
+            keep[np.nonzero(is_train)[0][keep_train]] = True
+            label_rows = label_rows[keep].reset_index(drop=True)
         table_names.append(LABEL_TABLE)
         table_sizes[LABEL_TABLE] = len(label_rows)
     offsets = _table_offsets(table_sizes)
@@ -614,6 +645,12 @@ def convert_relbench_task(
             tk, label_policy=label_policy, split_precedence=split_precedence
         )
         per_split, class_names = encode_labels(per_split_raw, task_type)
+        n_train_before_balance = len(per_split["train"])
+        if balance_train_labels and per_split["train"]:
+            ents = np.array(list(per_split["train"]), dtype=np.int64)
+            codes_tr = np.array([per_split["train"][e] for e in ents], dtype=np.int64)
+            keep = balanced_keep_mask(codes_tr, np.random.RandomState(seed), balance_max_ratio)
+            per_split["train"] = {int(e): int(c) for e, c in zip(ents[keep], codes_tr[keep])}
         ent_off = offsets[tk.entity_table]
         for s in SPLITS:
             for ent, lab in per_split[s].items():
@@ -635,8 +672,17 @@ def convert_relbench_task(
             }
             for s in SPLITS
         }
+    if balance_train_labels:
+        tr_codes = y[split_masks["train"]].astype(np.int64)
+        label_stats["train_balancing"] = {
+            "before": int(n_train_before_balance),
+            "after": int(split_masks["train"].sum()),
+            "max_ratio": float(balance_max_ratio),
+            "class_counts_after": {str(c): int(n) for c, n in zip(*np.unique(tr_codes, return_counts=True))},
+        }
     log("[relbench] labels per split: " + ", ".join(
-        f"{s}={int(split_masks[s].sum())}" for s in SPLITS) + f"; classes={class_names}")
+        f"{s}={int(split_masks[s].sum())}" for s in SPLITS) + f"; classes={class_names}"
+        + (f"; train balanced {n_train_before_balance} -> {int(split_masks['train'].sum())}" if balance_train_labels else ""))
 
     # ---- subsample (before featurizing: features are the memory hog)
     keep: Optional[np.ndarray] = None
@@ -810,6 +856,8 @@ def convert_relbench_task(
             "feature_width": feature_width,
             "contract_link_tables": contract_link_tables,
             "label_mode": label_mode,
+            "balance_train_labels": balance_train_labels,
+            "balance_max_ratio": balance_max_ratio,
             "seed": seed,
         },
         "relbench_version": getattr(relbench, "__version__", "unknown"),
