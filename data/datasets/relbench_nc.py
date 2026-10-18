@@ -40,7 +40,7 @@ import json
 import os
 from pathlib import Path
 from types import ModuleType
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 from torch_geometric.data import Data
@@ -78,21 +78,59 @@ _BAL_DIR_SUFFIX = {False: "", True: "__balanced"}
 VARIANTS = [(m, b) for m in LABEL_MODES for b in (False, True)]
 
 
-def registry_key(dataset: str, task: str, label_mode: str = "entity", balanced: bool = False) -> str:
+def _tag_suffix(tag: Optional[str]) -> str:
+    """Free-form conversion tag (``--tag ctxval``) -> key suffix ``_CTXVAL`` / dir suffix ``__ctxval``."""
+    if not tag:
+        return ""
+    clean = "".join(ch if ch.isalnum() else "_" for ch in tag).strip("_")
+    return clean
+
+
+def registry_key(dataset: str, task: str, label_mode: str = "entity", balanced: bool = False,
+                 tag: Optional[str] = None) -> str:
     ds = dataset.lower()
     if ds.startswith("rel-"):
         ds = ds[len("rel-"):]
-    return (f"RELBENCH_{ds}_{task}".upper().replace("-", "_")
-            + _MODE_KEY_SUFFIX[label_mode] + _BAL_KEY_SUFFIX[bool(balanced)])
+    key = (f"RELBENCH_{ds}_{task}".upper().replace("-", "_")
+           + _MODE_KEY_SUFFIX[label_mode] + _BAL_KEY_SUFFIX[bool(balanced)])
+    t = _tag_suffix(tag)
+    return key + (f"_{t.upper()}" if t else "")
 
 
-def cache_dir(data_dir: str, dataset: str, task: str, label_mode: str = "entity", balanced: bool = False) -> Path:
+def cache_dir(data_dir: str, dataset: str, task: str, label_mode: str = "entity", balanced: bool = False,
+              tag: Optional[str] = None) -> Path:
+    t = _tag_suffix(tag)
     return (Path(data_dir) / ROOT_FOLDER
-            / f"{dataset}__{task}{_MODE_DIR_SUFFIX[label_mode]}{_BAL_DIR_SUFFIX[bool(balanced)]}")
+            / f"{dataset}__{task}{_MODE_DIR_SUFFIX[label_mode]}{_BAL_DIR_SUFFIX[bool(balanced)]}"
+              f"{'__' + t.lower() if t else ''}")
 
 
-def cache_path(data_dir: str, dataset: str, task: str, label_mode: str = "entity", balanced: bool = False) -> Path:
-    return cache_dir(data_dir, dataset, task, label_mode, balanced) / "data.pt"
+def cache_path(data_dir: str, dataset: str, task: str, label_mode: str = "entity", balanced: bool = False,
+               tag: Optional[str] = None) -> Path:
+    return cache_dir(data_dir, dataset, task, label_mode, balanced, tag) / "data.pt"
+
+
+def _tags_from_env() -> List[str]:
+    """``RELBENCH_TAGS="ctxval,nofeatbig"`` registers tagged variants of every task."""
+    raw = os.environ.get("RELBENCH_TAGS", "").strip()
+    return [t.strip() for t in raw.replace(";", ",").split(",") if t.strip()]
+
+
+def discover_tags(data_dir: str) -> List[str]:
+    """Tags of tagged caches already present under ``<data_dir>/RelBench`` (no env needed)."""
+    root = Path(data_dir) / ROOT_FOLDER
+    tags: set = set()
+    if not root.is_dir():
+        return []
+    known = {"labelnodes", "balanced"}
+    for d in root.iterdir():
+        if not (d / "data.pt").is_file():
+            continue
+        parts = d.name.split("__")[2:]  # dataset__task__<suffixes...>
+        for ptag in parts:
+            if ptag not in known:
+                tags.add(ptag)
+    return sorted(tags)
 
 
 def load_relbench_nc(
@@ -102,14 +140,20 @@ def load_relbench_nc(
     *,
     label_mode: str = "entity",
     balanced: bool = False,
+    tag: Optional[str] = None,
     force: bool = False,
     **convert_kwargs: Any,
 ) -> Data:
     """Load (or build) the converted RelBench task graph."""
-    path = cache_path(data_dir, dataset, task, label_mode, balanced)
+    path = cache_path(data_dir, dataset, task, label_mode, balanced, tag)
     if path.is_file() and not force:
         data = torch.load(path, map_location="cpu", weights_only=False)
     else:
+        if tag:
+            raise FileNotFoundError(
+                f"{path} missing: tagged variants must be built explicitly with "
+                f"scripts/data/convert_relbench.py --tag {tag} (options are not derivable from the tag)"
+            )
         # Lazy import: relbench is only needed to build the cache.
         from .relbench_convert import convert_relbench_task
 
@@ -122,10 +166,13 @@ def load_relbench_nc(
     return data
 
 
-def _mod(dataset: str, task: str, label_mode: str = "entity", balanced: bool = False) -> ModuleType:
-    key = registry_key(dataset, task, label_mode, balanced)
+def _mod(dataset: str, task: str, label_mode: str = "entity", balanced: bool = False,
+         tag: Optional[str] = None) -> ModuleType:
+    key = registry_key(dataset, task, label_mode, balanced, tag)
     m = ModuleType(key.lower())
-    m.NAME = f"{dataset}/{task}" + ("" if label_mode == "entity" else f" [{label_mode}]") + (" [balanced]" if balanced else "")
+    m.NAME = (f"{dataset}/{task}" + ("" if label_mode == "entity" else f" [{label_mode}]")
+              + (" [balanced]" if balanced else "") + (f" [{tag}]" if tag else ""))
+    m.RELBENCH_TAG = tag
     m.REGISTRY_KEY = key
     m.RELBENCH_DATASET = dataset
     m.RELBENCH_TASK = task
@@ -144,7 +191,7 @@ def _mod(dataset: str, task: str, label_mode: str = "entity", balanced: bool = F
     ) -> Data:
         # The two GraphLand flags only steer apply_feature_preprocessing; the
         # cached graph already carries the per-type column masks either way.
-        return load_relbench_nc(data_dir, dataset, task, label_mode=label_mode, balanced=balanced)
+        return load_relbench_nc(data_dir, dataset, task, label_mode=label_mode, balanced=balanced, tag=tag)
 
     m.load_base_dataset = load_base_dataset
     return m
@@ -170,10 +217,15 @@ def _extra_tasks_from_env() -> List[Tuple[str, str]]:
 
 def build_relbench_registry() -> Dict[str, ModuleType]:
     reg: Dict[str, ModuleType] = {}
+    tags: List[Optional[str]] = [None] + _tags_from_env()
+    for extra in discover_tags(os.environ.get("RAW_DATA_DIR", "raw_data")):
+        if extra not in tags:
+            tags.append(extra)
     for ds, tk in RELBENCH_CLASSIFICATION_TASKS + _extra_tasks_from_env():
         for mode, bal in VARIANTS:
-            m = _mod(ds, tk, mode, bal)
-            reg[m.REGISTRY_KEY] = m
+            for tag in tags:
+                m = _mod(ds, tk, mode, bal, tag)
+                reg[m.REGISTRY_KEY] = m
     return reg
 
 

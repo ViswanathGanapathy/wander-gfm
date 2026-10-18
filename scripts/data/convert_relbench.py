@@ -86,6 +86,14 @@ def main(argv=None) -> int:
                    help="with --balance-train-labels: max (class count)/(rarest class count)")
     p.add_argument("--max-train-labels", type=int, default=None,
                    help="cap TRAIN labels (random, after balancing); bounds Wander's train-KV cache (~3 MB RAM per train node)")
+    p.add_argument("--val-as-context", action="store_true",
+                   help="move val labels into the train (in-context) set, keeping --keep-val rows as val")
+    p.add_argument("--keep-val", type=int, default=50)
+    p.add_argument("--feature-tables", type=str, default=None,
+                   help="comma list of tables that keep node features (others zeroed); 'entity' and '__labels__' are aliases")
+    p.add_argument("--tag", type=str, default=None,
+                   help="name for a non-default variant: cache dir gets __<tag>, registry key gets _<TAG> "
+                        "(e.g. --tag ctxval -> RELBENCH_F1_DRIVER_DNF_LN_CTXVAL)")
     p.add_argument("--label-mode", choices=("entity", "label_nodes"), default="entity",
                    help="entity: one label per entity node (registry key RELBENCH_*); "
                         "label_nodes: one timestamped node per RelBench label row (key RELBENCH_*_LN)")
@@ -107,12 +115,15 @@ def main(argv=None) -> int:
 
     failures = []
     for ds, tk in jobs:
-        out = cache_dir(args.data_dir, ds, tk, args.label_mode, args.balance_train_labels)
+        if (args.val_as_context or args.feature_tables) and not args.tag:
+            p.error("--val-as-context / --feature-tables change the graph; give the variant a --tag")
+        out = cache_dir(args.data_dir, ds, tk, args.label_mode, args.balance_train_labels, args.tag)
         if (out / "data.pt").is_file() and not args.force:
             print(f"[skip] {ds}/{tk}: {out / 'data.pt'} exists (--force to rebuild)")
             continue
-        print(f"=== {ds}/{tk} [{args.label_mode}{', balanced' if args.balance_train_labels else ''}] -> "
-              f"{registry_key(ds, tk, args.label_mode, args.balance_train_labels)} ===")
+        print(f"=== {ds}/{tk} [{args.label_mode}{', balanced' if args.balance_train_labels else ''}"
+              f"{', ' + args.tag if args.tag else ''}] -> "
+              f"{registry_key(ds, tk, args.label_mode, args.balance_train_labels, args.tag)} ===")
         try:
             convert_relbench_task(
                 ds, tk, out_dir=out, max_nodes=args.max_nodes,
@@ -123,6 +134,8 @@ def main(argv=None) -> int:
                 contract_link_tables=args.contract_link_tables, label_mode=args.label_mode,
                 balance_train_labels=args.balance_train_labels, balance_max_ratio=args.balance_max_ratio,
                 max_train_labels=args.max_train_labels,
+                val_as_context=args.val_as_context, keep_val=args.keep_val,
+                feature_tables=[x.strip() for x in args.feature_tables.split(",")] if args.feature_tables else None,
             )
         except Exception as exc:  # noqa: BLE001
             if len(jobs) == 1:

@@ -529,6 +529,9 @@ def convert_relbench_task(
     balance_train_labels: bool = False,
     balance_max_ratio: float = 1.0,
     max_train_labels: Optional[int] = None,
+    val_as_context: bool = False,
+    keep_val: int = 50,
+    feature_tables: Optional[Sequence[str]] = None,
     seed: int = 0,
     write: bool = True,
     verbose: bool = True,
@@ -574,6 +577,14 @@ def convert_relbench_task(
             balancing); val/test untouched. Wander's train-KV cache costs roughly
             3 MB of host RAM and ~0.07 s of H100 time per train node per seed
             (16 passes, 256 walks), so cap this at 10k-20k for large tasks.
+        val_as_context: move the val labels into the train (in-context) set,
+            keeping only ``keep_val`` random val rows so the split stays non-empty.
+            RelBench allows test predictions to use everything before
+            ``test_timestamp``, and val labels (the period right before test)
+            are the most informative history; Wander only reads train labels.
+        feature_tables: keep node features only on these tables (others get all
+            zeros). ``__labels__`` names the label-node pseudo-table and
+            ``entity`` the task's entity table. ``None`` keeps all tables.
         seed: RNG seed for seed-order shuffling inside each split and balancing.
     """
     if label_mode not in LABEL_MODES:
@@ -610,6 +621,12 @@ def convert_relbench_task(
         n_ent = len(db.table_dict[tk.entity_table])
         label_rows = label_rows[(label_rows["entity"] >= 0) & (label_rows["entity"] < n_ent)]
         label_rows = label_rows.reset_index(drop=True)
+        if val_as_context:
+            va_idx = np.nonzero((label_rows["split"] == "val").to_numpy())[0]
+            keep_as_val = np.random.RandomState(seed + 2).choice(
+                va_idx, size=min(int(keep_val), va_idx.size), replace=False) if va_idx.size else va_idx
+            to_train = np.setdiff1d(va_idx, keep_as_val)
+            label_rows.loc[to_train, "split"] = "train"
         n_train_before_balance = int((label_rows["split"] == "train").sum())
         if balance_train_labels:
             codes_all, _ = encode_label_values(label_rows["label"].to_numpy(), task_type)
@@ -655,6 +672,13 @@ def convert_relbench_task(
             tk, label_policy=label_policy, split_precedence=split_precedence
         )
         per_split, class_names = encode_labels(per_split_raw, task_type)
+        if val_as_context and per_split["val"]:
+            va_ents = np.array(sorted(per_split["val"]), dtype=np.int64)
+            keep_as_val = set(np.random.RandomState(seed + 2).choice(
+                va_ents, size=min(int(keep_val), va_ents.size), replace=False).tolist())
+            for ent in va_ents.tolist():
+                if ent not in keep_as_val:
+                    per_split["train"][ent] = per_split["val"].pop(ent)
         n_train_before_balance = len(per_split["train"])
         if balance_train_labels and per_split["train"]:
             ents = np.array(list(per_split["train"]), dtype=np.int64)
@@ -688,6 +712,8 @@ def convert_relbench_task(
         }
     if max_train_labels is not None:
         label_stats["max_train_labels"] = int(max_train_labels)
+    if val_as_context:
+        label_stats["val_as_context"] = {"keep_val": int(keep_val)}
     if balance_train_labels:
         tr_codes = y[split_masks["train"]].astype(np.int64)
         label_stats["train_balancing"] = {
@@ -767,6 +793,20 @@ def convert_relbench_task(
         tf = feats[t]
         log(f"[relbench]   {t:>24s}: rows={len(df):>8d} num={len(tf.num_cols)} "
             f"frac={len(tf.frac_cols)} cat={len(tf.cat_cols)} dropped={list(tf.dropped)}")
+
+    if feature_tables is not None:
+        wanted = {("__labels__" if n == LABEL_TABLE else n) for n in feature_tables}
+        wanted = {tk.entity_table if n == "entity" else n for n in wanted}
+        unknown = wanted - set(table_names)
+        if unknown:
+            raise ValueError(f"--feature-tables names unknown tables {sorted(unknown)}; have {table_names}")
+        for t in table_names:
+            if t not in wanted:
+                n_rows = feats[t].num.shape[0]
+                feats[t] = TableFeatures(table=t, num=np.empty((n_rows, 0), np.float32),
+                                         frac=np.empty((n_rows, 0), np.float32), cat=np.empty((n_rows, 0), np.int64),
+                                         dropped={"*": "excluded by --feature-tables"})
+        log(f"[relbench] features kept only on {sorted(wanted)}")
 
     num_cols = [(t, c) for t in table_names for c in feats[t].num_cols]
     frac_cols = [(t, c) for t in table_names for c in feats[t].frac_cols]
@@ -875,6 +915,9 @@ def convert_relbench_task(
             "balance_train_labels": balance_train_labels,
             "balance_max_ratio": balance_max_ratio,
             "max_train_labels": max_train_labels,
+            "val_as_context": val_as_context,
+            "keep_val": keep_val,
+            "feature_tables": list(feature_tables) if feature_tables is not None else None,
             "seed": seed,
         },
         "relbench_version": getattr(relbench, "__version__", "unknown"),

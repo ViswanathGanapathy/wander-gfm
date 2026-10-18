@@ -97,6 +97,13 @@ registers the graph with a further `_BAL` suffix, e.g. `RELBENCH_F1_DRIVER_DNF_L
 Wander uses the train labels as in-context examples, so a skewed prior (driver-dnf
 train is 88% positive, test 70%) shifts its scores; the balanced graph removes it.
 
+Further knobs, each requiring a `--tag` so the variant gets its own cache dir and
+registry key (`RELBENCH_<DS>_<TASK>_LN_BAL_<TAG>`): `--val-as-context` moves the val
+labels into the in-context train set (RelBench permits using everything before
+`test_timestamp`; keeps `--keep-val` rows as val), `--feature-tables entity,__labels__`
+keeps node features only on the named tables, `--max-train-labels N` bounds the
+train-KV cache (about 3 MB host RAM and 0.07 s H100 per train node per seed).
+
 ```bash
 # small, full database
 python scripts/data/convert_relbench.py --dataset rel-f1 --task driver-dnf --label-mode label_nodes
